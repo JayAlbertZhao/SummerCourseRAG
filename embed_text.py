@@ -5,10 +5,11 @@ import numpy as np
 import pandas as pd
 import json
 import os
+import re
 from PIL import Image
 import matplotlib.pyplot as plt
 
-index_dim = 3584
+index_dim = 4096
 
 device_name = "cuda:2"  # Specify a GPU to use
 device = torch.device(device_name)
@@ -21,7 +22,7 @@ model_name = "Mistral-7B-Instruct-v0.1"
 # Specify the paths
 emoji_json_path = '/data1n1/emo-visual-data/data.json'
 emoji_images_path = '/data1n1/emo-visual-data/emo'
-emoji_matrix_path = '/home/team_e'
+emoji_matrix_path = 'data/emoji/matrix'
 paper_matrix_path = 'data/paper/NLP_matrix'
 paper_json_path = 'data/paper/NLP_text_json'
 
@@ -72,6 +73,12 @@ def embed_text(text):
     outputs = model(**inputs)
     last_hidden_state = outputs.hidden_states[-1]
     embeddings = last_hidden_state.mean(dim=1).cpu().detach().numpy()
+
+    del inputs
+    del outputs
+    del last_hidden_state
+    torch.cuda.empty_cache()
+
     return embeddings
 
 
@@ -92,13 +99,13 @@ def build_paper_index(data_dir):
             paper = json.load(f)
             abstract = paper.get("Abstract", "")
             keywords = paper.get("Keywords", "")
-            combined_text = abstract + " " + keywords
+            combined_text = str(abstract) + " Keywords:" + str(keywords)
             abstract_keywords_embedding = embed_text(combined_text)
             abstract_keywords_embeddings.append(abstract_keywords_embedding)
 
             # 构建每篇论文的段落索引
             paragraphs = paper.get("Body", [])
-            paragraphs_embeddings = [embed_text(p) for p in paragraphs]
+            paragraphs_embeddings = embed_text_one_by_one(paragraphs)
             if paragraphs_embeddings:
                 paragraphs_index = faiss.IndexFlatL2(index_dim)
                 paragraphs_embeddings = np.vstack(paragraphs_embeddings)
@@ -115,6 +122,20 @@ def build_paper_index(data_dir):
         faiss.write_index(abstract_keywords_index, os.path.join(paper_matrix_path, 'abstract_keywords.index'))
 
 
+def embed_text_one_by_one(paragraphs):
+    embedding_list = []
+
+    for paragraph in paragraphs:
+        embedding = embed_text(paragraph)
+        embedding_list.append(embedding)
+
+        # print(paragraph)
+
+        torch.cuda.empty_cache()
+
+    return embedding_list
+
+
 def get_hidden_states(text):
     inputs = tokenizer(text, return_tensors="pt").to(device)
     outputs = model(**inputs)
@@ -129,8 +150,8 @@ def retrieve_image(query, k=5):
     """
 
     # 读文件
-    index = faiss.read_index('/home/team_e/emo_faiss_index.index')
-    df = pd.read_csv('/home/team_e/emo_df.csv')
+    index = faiss.read_index(os.path.join(emoji_matrix_path, 'emo_faiss_index.index'))
+    df = pd.read_csv(os.path.join(emoji_matrix_path, 'emo_df.csv'))
 
     query_embedding = embed_text(query)
     distances, indices = index.search(query_embedding, k)
@@ -138,7 +159,7 @@ def retrieve_image(query, k=5):
     return retrieved_images
 
 
-def retrieve_paper(query, k=2, m=2):
+def retrieve_paper(query, k=1, m=1):
     """
     Retrieve the top-k most relevant papers and top-m most relevant chunks from each paper.
     Returns the chunks with a window size of 1 (chunk + previous and next chunk).
@@ -152,17 +173,17 @@ def retrieve_paper(query, k=2, m=2):
     distances, paper_indices = abstract_keywords_index.search(query_embedding, k)
 
     retrieved_chunks = []
-    data_dir = paper_matrix_path
 
     for paper_idx in paper_indices[0]:
-        paper_id = os.listdir(data_dir)[paper_idx].split('.')[0]  # 假设文件名就是论文ID
+        paper_id = os.listdir(paper_matrix_path)[paper_idx].split('.')[0]  # 假设文件名就是论文ID_paragraphs
+        paper_id = re.sub('_paragraphs', '', paper_id)
 
         # 载入对应论文的段落索引
         paper_index_path = os.path.join(paper_matrix_path, f'{paper_id}_paragraphs.index')
         paper_index = faiss.read_index(paper_index_path)
 
         # 获取该论文中的段落
-        with open(os.path.join(data_dir, f'{paper_id}.json'), 'r') as f:
+        with open(os.path.join(paper_json_path, f'{paper_id}.json'), 'r') as f:
             paper = json.load(f)
             paragraphs = paper.get("Body", [])
 
@@ -193,7 +214,7 @@ def model_response(input_text):
     Generate a response using a pre-trained language model.
     """
     inputs = tokenizer(input_text, return_tensors="pt").to(device)
-    outputs = model.generate(**inputs)
+    outputs = model.generate(**inputs, max_length = 2000)
     response = tokenizer.decode(outputs[0], skip_special_tokens=True)
     return response
 
@@ -239,7 +260,7 @@ def query_paper(input_query, context):
     combined_input = f"{prompt}\n\n已知内容:\n{context}\n\n问题:\n{input_query}"
 
     # 调用模型生成回复
-    response = generate_response(combined_input)
+    response = model_response(combined_input)
 
     # 打印并返回模型回复和 chunk 列表
     print(f"模型回复: {response}")
@@ -263,8 +284,8 @@ def run_emoji(query):
         index = build_emoji_index(df)
 
         # 存文件
-        faiss.write_index(index, os.path.join(emoji_matrix_path, 'emo_Qwen_faiss_index.index'))
-        df.to_csv(os.path.join(emoji_matrix_path, 'emo_Qwen_df.csv'), index=False)
+        faiss.write_index(index, os.path.join(emoji_matrix_path, 'emo_faiss_index.index'))
+        df.to_csv(os.path.join(emoji_matrix_path, 'emo_df.csv'), index=False)
 
     response = generate_response(query)
     print(f"Model Response: {response}")
@@ -273,3 +294,9 @@ def run_emoji(query):
 
     show_images(retrieved_images)
 
+if __name__=='__main__':
+    emoji_query = '想睡了'
+    paper_query = '什么是DialogueRNN?'
+
+    run_emoji(emoji_query)
+    run_paper(paper_query)

@@ -111,9 +111,23 @@ def under_non_alpha_ratio(text: str, threshold: float = 0.5):
         return False
 
 
+def split_text(text, max_length):
+    paragraphs = []
+    while len(text) > max_length:
+        split_pos = max_length
+        while split_pos > 0 and text[split_pos] not in ' \n.,;':
+            split_pos -= 1
+        if split_pos == 0:
+            split_pos = max_length
+        paragraphs.append(text[:split_pos].strip())
+        text = text[split_pos:].strip()
+    if text:
+        paragraphs.append(text)
+    return paragraphs
+
+
 directory = "data/paper/NLP/"
 output_path = "data/paper/NLP_text_json/"
-
 
 for file_name in os.listdir(directory):
     file_path = os.path.join(directory, file_name)
@@ -128,7 +142,12 @@ for file_name in os.listdir(directory):
     # 过滤掉非字母字符比例不符合要求的段落
     filtered_body = [para for para in body if not under_non_alpha_ratio(para, threshold=0.5)]
 
-    result = {"Abstract": abstract, "Keywords": keywords, "Body": filtered_body}
+    max_length = 2000
+    split_body = []
+    for para in filtered_body:
+        split_body.extend(split_text(para, max_length))
+
+    result = {"Abstract": abstract, "Keywords": keywords, "Body": split_body}
 
     output_file = os.path.join(output_path, file_name[:-3] + "json")
     with open(output_file, 'w', encoding='utf-8') as file:
